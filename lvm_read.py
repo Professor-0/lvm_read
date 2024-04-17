@@ -7,7 +7,12 @@ from os import path
 import pickle
 import numpy as np
 
-__version__ = '1.21'
+__version__ = '1.30'
+
+
+class LVMFormatError(Exception):
+    pass
+
 
 def _lvm_pickle(filename):
     """ Reads pickle file (for local use)
@@ -54,6 +59,69 @@ def _read_lvm_base(filename):
     return lvm_data
 
 
+def get_separator(lines):
+    """ Search the LVM header for the separator header
+
+    :param lines: lines of lvm file
+    :return separator: separator for this lvm
+    """
+    # Search for separator header
+    for line in lines:
+        # Strip new line
+        line = line.replace('\r', '').replace('\n', '')
+        if line == 'Separator\tTab':
+            lines.seek(0)
+            return '\t'
+        elif line == 'Separator,Comma':
+            lines.seek(0)
+            return ','
+
+    raise LVMFormatError("Unable to find Separator header")
+
+
+def read_header(lines):
+    """ Read the LVM header and return relevant information
+
+    :param lines: lines of lvm file
+    :return lvm_header, data_header: information on lvm data
+    """
+
+    separator = get_separator(lines)
+
+    lvm_header = dict()
+    data_header = dict()
+
+    # First header is the LVM header
+    header = lvm_header
+
+    for line in lines:
+        # Strip new line
+        line = line.replace('\r', '').replace('\n', '')
+        # Reached end of lvm header -> switch to data header
+        if header is lvm_header and line.startswith('***End_of_Header***'):
+            header = data_header
+            continue
+        # Reached end of data header -> return both headers
+        elif line.startswith('***End_of_Header***'):
+            return lvm_header, data_header
+
+        # Skip blank lines
+        if line.startswith(separator):
+            continue
+
+        key, *data = line.split(separator)
+
+        if key == 'Separator':
+            header[key] = {'Comma': ',', 'Tab': '\t'}[data[0]]
+        else:
+            if len(data) == 1:
+                data = data[0]
+            header[key] = data
+
+    # Should return from inside for loop
+    raise LVMFormatError("Failed to parse header")
+
+
 def read_lines(lines):
     """ Read lines of strings.
 
@@ -61,71 +129,86 @@ def read_lines(lines):
     :return lvm_data: lvm dict
     """
     lvm_data = dict()
-    lvm_data['Decimal_Separator'] = '.'
-    data_channels_comment_reading = False
-    data_reading = False
-    segment = None
-    seg_data = []
-    first_column = 0
-    nr_of_columns = 0
-    segment_nr = 0
+
+    # Read header data
+    lvm_header, data_header = read_header(lines)
+    lvm_data['lvm_header'] = lvm_header
+    lvm_data['data_header'] = data_header
+
+    # Check if Decimal Separator header exists
+    if 'Decimal_Separator' not in lvm_header:
+        lvm_header['Decimal_Separator'] = '.'
+
     def to_float(a):
         try:
-            return float(a.replace(lvm_data['Decimal_Separator'], '.'))
+            return float(a.replace(lvm_header['Decimal_Separator'], '.'))
         except:
             return np.nan
-    for line in lines:
-        line = line.replace('\r', '')
-        line_sp = line.replace('\n', '').split('\t')
-        if line_sp[0] in ['***End_of_Header***', 'LabVIEW Measurement']:
-            continue
-        elif line in ['\n', '\t\n']:
-            # segment finished, new segment follows
-            segment = dict()
-            lvm_data[segment_nr] = segment
-            data_reading = False
-            segment_nr += 1
-            continue
-        elif data_reading:  # this was moved up, to speed up the reading
-            seg_data.append([to_float(a) for a in
-                             line_sp[first_column:(nr_of_columns + 1)]])
-        elif segment == None:
-            if len(line_sp) == 2:
-                key, value = line_sp
-                lvm_data[key] = value
-        elif segment != None:
-            if line_sp[0] == 'Channels':
-                key, value = line_sp[:2]
-                nr_of_columns = len(line_sp) - 1
-                segment[key] = eval(value)
-                if nr_of_columns < segment['Channels']:
-                    nr_of_columns = segment['Channels']
-                data_channels_comment_reading = True
-            elif line_sp[0] == 'X_Value':
-                seg_data = []
-                segment['data'] = seg_data
-                if lvm_data['X_Columns'] == 'No':
-                    first_column = 1
-                segment['Channel names'] = line_sp[first_column:(nr_of_columns + 1)]
-                data_channels_comment_reading = False
-                data_reading = True
-            elif data_channels_comment_reading:
-                key, values = line_sp[0], line_sp[1:(nr_of_columns + 1)]
-                if key in ['Delta_X', 'X0', 'Samples']:
-                    segment[key] = [eval(val.replace(lvm_data['Decimal_Separator'], '.')) if val else np.nan for val in
-                                    values]
-                else:
-                    segment[key] = values
-            elif len(line_sp) == 2:
-                key, value = line_sp
-                segment[key] = value
 
-    if not lvm_data[segment_nr - 1]:
-        del lvm_data[segment_nr - 1]
-        segment_nr -= 1
-    lvm_data['Segments'] = segment_nr
-    for s in range(segment_nr):
-        lvm_data[s]['data'] = np.asarray(lvm_data[s]['data'])
+    # First line after headers should be column names
+    # Will begin with 'X_Value'
+    columnNames = next(lines).replace('\r', '').replace('\n', '')
+    if not columnNames.startswith('X_Value'):
+        raise LVMFormatError("Failed to read column names")
+
+    data_header['Columns'] = columnNames.split(lvm_header['Separator'])
+
+    # Create the channels from the data header
+    X_channel = None
+
+    lvm_data['Channels'] = []
+    channel_no = 0
+
+    for i in range(len(data_header['Columns'])):
+        if data_header['Columns'][i] == 'X_Value':
+            channel = {
+                'Name': data_header['X_Dimension'][channel_no],
+                'Data': [],
+                'X Channel': None
+            }
+            # Set this channel as the X channel for the next channels
+            X_channel = channel
+        elif data_header['Columns'][i] == 'Comment':
+            channel = {
+                'Name': 'Comment',
+                'Data': [],
+            }
+        else:
+            channel = {
+                'Name': data_header['Columns'][i],
+                'Samples': data_header['Samples'][channel_no],
+                'Date': data_header['Date'][channel_no],
+                'Time': data_header['Time'][channel_no],
+                'Y Unit': (data_header['Y_Unit_Label'][channel_no]
+                           if 'Y_Unit_Label' in data_header else None),
+                'X Dimension': data_header['X_Dimension'][channel_no],
+                'X0': data_header['X0'][channel_no],
+                'Delta X': data_header['Delta_X'][channel_no],
+                'Data': [],
+                'X Channel': X_channel
+            }
+            channel_no += 1
+
+        lvm_data['Channels'].append(channel)
+
+    # Read data into channels
+    for line in lines:
+        line = line.replace('\r', '').replace('\n', '')
+        line_sp = line.split(lvm_header['Separator'])
+        for i in range(len(lvm_data['Channels'])):
+            ch = lvm_data['Channels'][i]
+            dp = line_sp[i] if len(line_sp) > i else ''  # fill in blank values
+            if ch['Name'] == 'Comment':
+                ch['Data'].append(dp if dp else '')
+            else:
+                ch['Data'].append(to_float(dp))
+
+    for ch in lvm_data['Channels']:
+        ch['Data'] = np.asarray(ch['Data'])
+
+    lvm_data['data'] = np.column_stack(
+        [ch['Data'] for ch in lvm_data['Channels'] if ch['Name'] != 'Comment'])
+
     return lvm_data
 
 
@@ -185,11 +268,10 @@ def read(filename, read_from_pickle=True, dump_file=True):
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
-    da = read('data/with_comments.lvm',read_from_pickle=False)
+    da = read('data/with_comments.lvm', read_from_pickle=False)
     #da = read('data\with_empty_fields.lvm',read_from_pickle=False)
     print(da.keys())
     print('Number of segments:', da['Segments'])
 
     plt.plot(da[0]['data'])
     plt.show()
-
