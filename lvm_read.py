@@ -199,18 +199,16 @@ def read_segment_data(lines, file_header, seg_header, x0=None):
     if x0 is None:
         x0 = seg_header['X0']
 
-    # Check if a new segment exists
-    line = next(lines, None)
-    if line is None:
-        return None, None
-
-    sample = 0
     max_samples = max(samples)
 
     # Read data into channels
-    while sample < max_samples \
-            and line is not None \
-            and line not in ['\n', '\r\n', '']:
+    for sample in range(max_samples):
+        line = next(lines, None)
+        if line is None:
+            if sample == 0:
+                return None, None
+            else:
+                raise LVMFormatError("EOF before finished segment")
 
         line = line.replace('\r', '').replace('\n', '')
         values = line.split(file_header['Separator'])
@@ -247,13 +245,6 @@ def read_segment_data(lines, file_header, seg_header, x0=None):
         # Add comments
         comments.append(values[columns] if len(values) > columns else '')
 
-        # Get next line
-        line = next(lines, None)
-        sample += 1
-
-    if line is None and sample != max_samples:
-        raise LVMFormatError("EOF before finished segment")
-    
     for ch in seg_data:
         ch = [np.asarray(ch[0]),np.asarray(ch[1])]
 
@@ -510,15 +501,15 @@ def read(filename, read_from_pickle=True, dump_file=True):
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
-    da = read('data/with_comments.lvm', read_from_pickle=False)
+    da = read('dummy_dataset.lvm', read_from_pickle=False)
     #da = read('data\with_empty_fields.lvm',read_from_pickle=False)
     print(da.keys())
     print('Number of segments:', len(da['segments']))
 
-    for seg in da['Segments']:
+    for seg in da['segments']:
         labels = [f"{l} ({u})" for l,u in zip(seg['header']['Y_Labels'],
                                               seg['header']['Y_Unit_Label'])]
-        for ch, l in zip(seg['Data'], labels):
+        for ch, l in zip(seg['data'], labels):
             plt.plot(*ch, label=l)
 
         plt.legend()

@@ -53,6 +53,10 @@ def test_several_comments():
                 read_from_pickle=False, dump_file=False)
     np.testing.assert_equal(data['segments'][0]['data'][0][1][0], 1.833787)
 
+def test_multi_segment():
+    data = read('./data/multi_segment_uneven_samples.lvm',
+                read_from_pickle=False, dump_file=False)
+    np.testing.assert_equal(data['segments'][1]['data'][0][1][0], 447.234561)
 
 def timing_on_long_short_lvm():
     N = 5
